@@ -1,0 +1,15 @@
+# Accepted Trivy findings for the VorPilot Server images.
+#
+# The release gate blocks on CRITICAL vulnerabilities that have a fix. An entry
+# here lets one through; it is a decision, not a silencer, so every entry
+# carries:
+#   statement   why it does not apply, or why it cannot be fixed now
+#   expired_at  when to look again — Trivy enforces the finding after this date
+#
+# vulnerabilities:
+#   - id: CVE-0000-00000
+#     paths:
+#       - usr/local/bin/scout
+#     statement: Not reachable — <reason>.
+#     expired_at: YYYY-MM-DD
+vulnerabilities: []

@@ -1,0 +1,21 @@
+# Syntax checks of the release tools on every push to main. Publishes nothing.
+name: checks
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Syntax of the release tools
+        run: |
+          for script in tools/*.sh; do bash -n "$script"; done
+          python3 -m py_compile tools/release_checks.py
