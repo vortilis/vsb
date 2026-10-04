@@ -2,19 +2,27 @@
 """Checks for VorPilot Server release builds.
 
 A release starts as a set of pre-built artifacts, described by release.json and
-listed in checksums.txt. The release workflow checks them, builds the images
-into OCI image layouts, checks the images and publishes exactly those layouts.
-Everything is read with the standard library, straight from the files:
+listed in checksums.txt: binaries, the web UI bundle and the Helm chart
+packages. The release workflow checks them, builds the images into OCI image
+layouts, checks the images and the charts, and publishes exactly those layouts
+and packages. A chart of version X runs the images tagged X. Everything is
+read with the standard library, straight from the files:
 
-  check-artifacts    checksums, release.json against the tag, and the version
-                     and service endpoint compiled into the binaries and the
-                     web UI bundle
+  check-artifacts    checksums, release.json against the tag, the version and
+                     service endpoint compiled into the binaries and the web UI
+                     bundle, and the chart packages' names and versions
   digest             index digest of a tag in an OCI layout
   inspect            one image layout: platform set, SBOM per platform,
                      version label, version and endpoint inside the files
   record-images      add the digests of the built layouts to release.json
   check-publishable  tag and channel rules, layouts unchanged since recorded;
                      prints "<component> <name> <digest>" per image
+  check-chart        one chart package: name, version and appVersion of the
+                     chart and of every bundled subchart
+  yaml-set           set scalars in a YAML file in place, keeping its comments
+  check-rendered     the release's own images in a rendered chart are exactly
+                     <repository>:<tag>
+  file-digest        sha256 of a file, as a registry names a layer
 """
 
 from __future__ import annotations
@@ -23,9 +31,10 @@ import argparse
 import fnmatch
 import hashlib
 import json
+import re
 import sys
 import tarfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 REF_NAME = "org.opencontainers.image.ref.name"
 VERSION_LABEL = "org.opencontainers.image.version"
@@ -53,6 +62,8 @@ RECORD = "release.json"
 CHECKSUMS = "checksums.txt"
 THIRD_PARTY = "third-party-images.txt"
 PUBLISHED_CHANNELS = ("release", "beta")
+# Published as oci://<registry>/charts/<name>, versioned with the release tag.
+CHARTS = ("vorpilot-server", "vorpilot-agent", "vorpilot-rbac-bootstrap")
 
 
 class CheckError(Exception):
@@ -63,9 +74,14 @@ def scout_binary(platform: str) -> str:
     return "scout-" + platform.replace("/", "-")
 
 
-def artifact_names(platforms: list[str]) -> list[str]:
+def chart_package(name: str, tag: str) -> str:
+    return f"{name}-{tag}.tgz"
+
+
+def artifact_names(platforms: list[str], tag: str) -> list[str]:
     """Every artifact of a release besides checksums.txt itself."""
-    return sorted([scout_binary(p) for p in platforms] + [FRONTEND_BUNDLE, RECORD, THIRD_PARTY])
+    return sorted([scout_binary(p) for p in platforms] + [chart_package(c, tag) for c in CHARTS]
+                  + [FRONTEND_BUNDLE, RECORD, THIRD_PARTY])
 
 
 def channel_of(tag: str) -> str:
@@ -169,10 +185,13 @@ def check_artifacts(directory: Path, tag: str, version: str) -> list[str]:
     failures = tag_failures(record, tag)
     if record["version"] != version:
         failures.append(f"release.json says version {record['version']}, expected {version}")
-    failures += checksum_failures(directory, artifact_names(record["platforms"]))
+    failures += checksum_failures(directory, artifact_names(record["platforms"], tag))
     if failures:
         return failures  # contents of a mismatched set prove nothing
-    return artifact_content_failures(directory, record["platforms"], version, PRODUCTION_MARKERS)
+    failures = artifact_content_failures(directory, record["platforms"], version, PRODUCTION_MARKERS)
+    for chart in CHARTS:
+        failures += check_chart(directory / chart_package(chart, tag), chart, tag)
+    return failures
 
 
 # ---- image layouts ----------------------------------------------------------------
@@ -314,6 +333,199 @@ def check_publishable(directory: Path, tag: str) -> list[tuple[str, str, str]]:
     return rows
 
 
+# ---- YAML scalars, edited in place --------------------------------------------------
+# Chart files are documentation too (`helm show values` prints values.yaml), so
+# they are edited line by line: comments and every other line stay as they are.
+# Only scalars of block mappings are addressed; anything else is refused.
+
+_KEY = re.compile(r"^(?P<indent> *)(?P<key>[A-Za-z0-9_.-]+):(?P<rest>(?:\s.*)?)$")
+_ITEM = re.compile(r"^(?P<indent> *)- ")
+
+
+def _split_comment(rest: str) -> tuple[str, str]:
+    """Value text and trailing comment of what follows "key:"."""
+    quote = None
+    for index, char in enumerate(rest):
+        if quote:
+            if char == quote and not (quote == '"' and rest[index - 1] == "\\"):
+                quote = None
+        elif char in "\"'":
+            quote = char
+        elif char == "#" and (index == 0 or rest[index - 1] in " \t"):
+            return rest[:index], rest[index:]
+    return rest, ""
+
+
+def _scalars(text: str):
+    """(line number, path, value text, value column) of every block-mapping
+    entry with a value on its line; value text is None for a block scalar.
+    Keys inside sequence items get "[]" in their path, so no dotted path
+    reaches into a list."""
+    stack: list[tuple[int, str]] = []
+    block_indent = None
+    for number, line in enumerate(text.split("\n")):
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip(" "))
+        if block_indent is not None:
+            if not stripped or indent > block_indent:
+                continue
+            block_indent = None
+        if not stripped or stripped.startswith("#") or stripped in ("---", "..."):
+            continue
+        item = _ITEM.match(line)
+        if item:
+            while stack and stack[-1][0] >= indent:
+                stack.pop()
+            stack.append((indent, "[]"))
+            # The item's first key sits two columns in; same length, same columns.
+            line = " " * (indent + 2) + line[indent + 2:]
+            indent += 2
+        match = _KEY.match(line)
+        if not match:
+            continue
+        while stack and stack[-1][0] >= indent:
+            stack.pop()
+        key = match["key"]
+        path = [entry for _, entry in stack] + [key]
+        value, _ = _split_comment(match["rest"])
+        if not value.strip():
+            stack.append((indent, key))
+            continue
+        if value.strip()[0] in "|>":
+            block_indent = indent
+            yield number, path, None, match.start("rest")
+            continue
+        yield number, path, value, match.start("rest")
+
+
+def _unquote(value: str) -> str:
+    value = value.strip()
+    if value.startswith('"'):
+        return json.loads(value)
+    if value.startswith("'") and value.endswith("'"):
+        return value[1:-1].replace("''", "'")
+    return value
+
+
+def _find_scalar(text: str, path: str):
+    target = path.split(".")
+    hits = [hit for hit in _scalars(text) if hit[1] == target]
+    if len(hits) != 1:
+        raise CheckError(f"{path}: {'not found' if not hits else f'found {len(hits)} times'}")
+    number, _, value, column = hits[0]
+    if value is None or value.strip()[0] in "{[&*!":
+        raise CheckError(f"{path} does not hold a plain scalar")
+    return number, value, column
+
+
+def get_scalar(text: str, path: str) -> str:
+    return _unquote(_find_scalar(text, path)[1])
+
+
+def set_scalar(text: str, path: str, value: str) -> str:
+    """text with the scalar at the dotted path replaced by value (quoted)."""
+    number, _, column = _find_scalar(text, path)
+    lines = text.split("\n")
+    _, comment = _split_comment(lines[number][column:])
+    lines[number] = lines[number][:column] + " " + json.dumps(value) + (f"  {comment}" if comment else "")
+    return "\n".join(lines)
+
+
+def parse_sets(sets: list[str]) -> list[tuple[str, str]]:
+    pairs = []
+    for item in sets:
+        path, separator, value = item.partition("=")
+        if not separator or not path:
+            raise CheckError(f"--set {item!r}: expected path=value")
+        pairs.append((path, value))
+    return pairs
+
+
+# ---- chart packages ---------------------------------------------------------------
+
+def read_chart(package: Path) -> tuple[str, dict[str, bytes]]:
+    """Chart name (the single top directory) and file contents of a package.
+    Regular files only, under one root, no absolute or parent paths."""
+    files: dict[str, bytes] = {}
+    roots = set()
+    with tarfile.open(package, mode="r:gz") as archive:
+        for member in archive:
+            parts = PurePosixPath(member.name).parts
+            if not parts or member.name.startswith("/") or ".." in parts:
+                raise CheckError(f"{package.name}: unsafe path {member.name!r}")
+            if member.isdir():
+                continue
+            if not member.isfile():
+                raise CheckError(f"{package.name}: {member.name} is not a regular file")
+            roots.add(parts[0])
+            extracted = archive.extractfile(member)
+            files[member.name] = extracted.read() if extracted else b""
+    if len(roots) != 1:
+        raise CheckError(f"{package.name}: expected one chart directory, found {sorted(roots)}")
+    return roots.pop(), files
+
+
+def check_chart(package: Path, name: str, tag: str) -> list[str]:
+    """Name, version and appVersion of the chart and of every bundled subchart."""
+    if not package.is_file():
+        return [f"{package.name} missing"]
+    try:
+        root, files = read_chart(package)
+    except CheckError as error:
+        return [str(error)]
+    if root != name:
+        return [f"{package.name}: chart {root}, expected {name}"]
+    failures = []
+    for path, content in sorted(files.items()):
+        parts = PurePosixPath(path).parts
+        if parts[1:2] == ("charts",) and path.endswith(".tgz"):
+            failures.append(f"{package.name}: {path} — subcharts are bundled unpacked")
+        # <root>/Chart.yaml, <root>/charts/<sub>/Chart.yaml, and so on down.
+        is_chart = (parts[-1] == "Chart.yaml" and len(parts) % 2 == 0
+                    and all(parts[i] == "charts" for i in range(1, len(parts) - 1, 2)))
+        if not is_chart:
+            continue
+        text = content.decode()
+        expected = {"version": tag, "appVersion": tag}
+        if len(parts) == 2:
+            expected["name"] = name
+        for key, value in expected.items():
+            try:
+                actual = get_scalar(text, key)
+            except CheckError:
+                actual = None
+            if actual != value:
+                failures.append(f"{package.name}: {path} {key}={actual!r}, expected {value!r}")
+    if f"{name}/Chart.yaml" not in files:
+        failures.append(f"{package.name}: no Chart.yaml")
+    return failures
+
+
+_IMAGE = re.compile(r"""^\s*(?:-\s+)?image:\s*["']?([^"'\s]+)["']?\s*$""", re.M)
+
+
+def image_repository(reference: str) -> str:
+    """Repository of an image reference: without @digest and without :tag."""
+    base = reference.split("@", 1)[0]
+    if ":" in base.rsplit("/", 1)[-1]:
+        base = base[:base.rfind(":")]
+    return base
+
+
+def rendered_image_failures(manifest: str, tag: str, repositories: list[str]) -> list[str]:
+    """Each of the release's own repositories present in a rendered chart and
+    every use of it exactly <repository>:<tag> — the chart runs the images of
+    its own version, by tag."""
+    images = sorted(set(_IMAGE.findall(manifest)))
+    failures = []
+    for repository in sorted(repositories):
+        own = [image for image in images if image_repository(image) == repository]
+        if not own:
+            failures.append(f"{repository}: not in the rendered chart")
+        failures += [f"{image}: expected {repository}:{tag}" for image in own if image != f"{repository}:{tag}"]
+    return failures
+
+
 # ---- command line -----------------------------------------------------------------
 
 def report(failures: list[str], success: str) -> int:
@@ -351,11 +563,40 @@ def main(argv: list[str]) -> int:
     publishable.add_argument("--dir", required=True)
     publishable.add_argument("--tag", required=True)
 
+    chart = sub.add_parser("check-chart")
+    for option in ("--chart", "--name", "--tag"):
+        chart.add_argument(option, required=True)
+
+    edit = sub.add_parser("yaml-set")
+    edit.add_argument("--file", required=True)
+    edit.add_argument("--set", action="append", required=True, help="path=value, repeated")
+
+    rendered = sub.add_parser("check-rendered")
+    rendered.add_argument("--manifest", required=True)
+    rendered.add_argument("--tag", required=True)
+    rendered.add_argument("--image", action="append", default=[], help="repository of this release, repeated")
+
+    file_digest = sub.add_parser("file-digest")
+    file_digest.add_argument("--file", required=True)
+
     args = parser.parse_args(argv)
     try:
         if args.command == "check-artifacts":
             failures = check_artifacts(Path(args.dir), args.tag, args.version)
-            return report(failures, f"artifacts {args.tag} — checksums, version {args.version}, endpoints")
+            return report(failures, f"artifacts {args.tag} — checksums, version {args.version}, endpoints, charts")
+        if args.command == "check-chart":
+            return report(check_chart(Path(args.chart), args.name, args.tag), f"{args.name} {args.tag}")
+        if args.command == "yaml-set":
+            path = Path(args.file)
+            text = path.read_text()
+            for key, value in parse_sets(args.set):
+                text = set_scalar(text, key, value)
+            path.write_text(text)
+        elif args.command == "check-rendered":
+            failures = rendered_image_failures(Path(args.manifest).read_text(), args.tag, args.image)
+            return report(failures, f"{Path(args.manifest).name}: images of {args.tag}")
+        elif args.command == "file-digest":
+            print("sha256:" + sha256_file(Path(args.file)))
         if args.command == "digest":
             print(Layout(Path(args.layout)).tag_descriptor(args.tag)["digest"])
         elif args.command == "inspect":

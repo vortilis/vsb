@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# publish-server-images.sh — ships the checked VorPilot Server image layouts.
-# Runs in the release job after verify-server-images.sh, with the job token
-# logged in to the registry and an OIDC token available for keyless signing.
+# publish-server-release.sh — ships the checked VorPilot Server image layouts
+# and Helm charts. Runs in the release job after the images and charts were
+# built and checked (prepare-release.sh), with the job token logged in to the
+# registry for regctl and helm and an OIDC token available for keyless signing.
 #
 # Nothing is rebuilt, so the registry digest is the digest that was checked.
 # Per image:
@@ -16,16 +17,25 @@
 #      manifest), then verify it against this workflow's identity;
 #   5. release channel only: move `latest` to this version unless a newer
 #      version already holds it — latest never moves back, beta never touches it.
-# Writes images.txt (these images and the Helm chart's third-party images, by
-# digest) and digests.env (SCOUT_DIGEST=…, FRONTEND_DIGEST=…) for attestation.
+# Then per chart (<dir>/charts/<chart>-<tag>.tgz, verify-server-charts.sh):
+#   1. the same immutability: a chart tag already there must hold this very
+#      package (its layer is the package's sha256), otherwise refuse;
+#   2. helm push to oci://<registry>/charts, re-read the remote digest;
+#   3. sign keyless and verify, as for the images.
+# Charts have no `latest`: Helm resolves the newest version itself.
+# Writes images.txt (these images, the charts and the third-party images, by
+# digest) and digests.env (SCOUT_DIGEST=…, FRONTEND_DIGEST=…,
+# SERVER_CHART_DIGEST=…, AGENT_CHART_DIGEST=…, RBAC_BOOTSTRAP_CHART_DIGEST=…)
+# for attestation.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CHECKS="$SCRIPT_DIR/release_checks.py"
 OIDC_ISSUER="https://token.actions.githubusercontent.com"
+CHARTS=(vorpilot-server vorpilot-agent vorpilot-rbac-bootstrap)
 
 usage() {
-  echo "Usage: publish-server-images.sh --dir DIR --tag TAG --registry HOST/NAMESPACE --identity URL"
+  echo "Usage: publish-server-release.sh --dir DIR --tag TAG --registry HOST/NAMESPACE --identity URL"
 }
 
 die() { echo "error: $*" >&2; exit 2; }
@@ -46,12 +56,16 @@ done
 for required in DIR TAG REGISTRY IDENTITY; do
   [ -n "${!required}" ] || { usage >&2; die "missing --$(echo "$required" | tr 'A-Z' 'a-z')"; }
 done
-for tool in regctl cosign python3; do
+for tool in regctl cosign helm python3; do
   command -v "$tool" >/dev/null 2>&1 || die "$tool not found"
 done
 
 ROWS="$(python3 "$CHECKS" check-publishable --dir "$DIR" --tag "$TAG")" || exit 1
 [ -f "$DIR/third-party-images.txt" ] || die "$DIR/third-party-images.txt missing"
+# Every chart is checked for presence before the first image is pushed.
+for chart in "${CHARTS[@]}"; do
+  [ -f "$DIR/charts/$chart-$TAG.tgz" ] || die "$DIR/charts/$chart-$TAG.tgz missing — run verify-server-charts.sh first"
+done
 CHANNEL="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["channel"])' "$DIR/release.json")"
 
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/vorpilot-publish.XXXXXX")"
@@ -134,6 +148,45 @@ while read -r component name digest; do
   echo "$reference@$digest" >>"$TMP_ROOT/images.txt"
   echo "$(echo "$component" | tr 'a-z' 'A-Z')_DIGEST=$digest" >>"$TMP_ROOT/digests.env"
 done <<<"$ROWS"
+
+# The layer digests of a chart manifest, one per line (Helm pushes the
+# package as its only layer). Same contract as remote_digest for errors.
+remote_layers() {
+  rc manifest get "$1" --format '{{range .Layers}}{{println .Digest}}{{end}}' | sed '/^$/d'
+}
+
+for chart in "${CHARTS[@]}"; do
+  package="$DIR/charts/$chart-$TAG.tgz"
+  reference="$REGISTRY/charts/$chart:$TAG"
+  layer="$(python3 "$CHECKS" file-digest --file "$package")"
+  existing="$(remote_digest "$reference")" || exit 2
+  if [ -n "$existing" ]; then
+    held="$(remote_layers "$reference")" || die "cannot read the layers of $reference, refusing to go on"
+    [ "$held" = "$layer" ] \
+      || die "$reference already holds another package (${held:-no layer}), this one is $layer — a published version is never overwritten"
+    digest="$existing"
+    echo "   = $reference already holds this package"
+  else
+    helm push "$package" "oci://$REGISTRY/charts" </dev/null >/dev/null
+    digest="$(remote_digest "$reference")" || exit 2
+    [ -n "$digest" ] || die "$reference not found after the push"
+    held="$(remote_layers "$reference")" || die "cannot read the layers of $reference"
+    [ "$held" = "$layer" ] || die "$reference reads back with layer ${held:-none}, expected $layer"
+    echo "   ↑ $reference  $digest"
+  fi
+
+  pinned="$REGISTRY/charts/$chart@$digest"
+  if cosign_verify "$pinned" </dev/null; then
+    echo "   = $pinned already signed by this workflow"
+  else
+    cosign sign --yes "$pinned" </dev/null
+    cosign_verify "$pinned" </dev/null || { cat "$TMP_ROOT/verify.out" >&2; die "signature on $pinned does not verify"; }
+    echo "   ✓ $pinned signed and verified"
+  fi
+
+  echo "$reference@$digest" >>"$TMP_ROOT/images.txt"
+  echo "$(echo "${chart#vorpilot-}" | tr 'a-z-' 'A-Z_')_CHART_DIGEST=$digest" >>"$TMP_ROOT/digests.env"
+done
 
 cat "$DIR/third-party-images.txt" >>"$TMP_ROOT/images.txt"
 cp "$TMP_ROOT/images.txt" "$DIR/images.txt"

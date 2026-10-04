@@ -5,24 +5,26 @@
 #   1. download the assets of the release tagged --tag (normally still a draft,
 #      visible only with write access) into <work>/artifacts;
 #   2. check them: checksums, release.json against the tag, version and
-#      endpoint inside the binaries and the web UI bundle;
+#      endpoint inside the binaries and the web UI bundle, the chart packages;
 #   3. build the images into <work>/server (build-server-images.sh);
-#   4. check the images (verify-server-images.sh).
+#   4. check the images (verify-server-images.sh);
+#   5. check the charts (verify-server-charts.sh): version, lint, the release's
+#      images by tag.
 #
 # The tag names everything: v<version> → release channel, v<version>-beta →
-# beta. Needs gh (GH_TOKEN), docker buildx, trivy and python3.
+# beta. Needs gh (GH_TOKEN), docker buildx, trivy, helm and python3.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CHECKS="$SCRIPT_DIR/release_checks.py"
 
 usage() {
-  echo "Usage: prepare-release.sh --repo OWNER/NAME --tag vX.Y.Z[-beta] --revision SHA --work DIR --docker-dir DIR --ignorefile FILE"
+  echo "Usage: prepare-release.sh --repo OWNER/NAME --tag vX.Y.Z[-beta] --revision SHA --work DIR --docker-dir DIR --ignorefile FILE --registry HOST/NAMESPACE"
 }
 
 die() { echo "error: $*" >&2; exit 2; }
 
-REPO="" TAG="" REVISION="" WORK="" DOCKER_DIR="" IGNOREFILE=""
+REPO="" TAG="" REVISION="" WORK="" DOCKER_DIR="" IGNOREFILE="" REGISTRY=""
 while [ "$#" -gt 0 ]; do
   case "$1" in -h|--help) usage; exit 0 ;; esac
   [ "$#" -ge 2 ] || { usage >&2; die "missing value for $1"; }
@@ -33,11 +35,12 @@ while [ "$#" -gt 0 ]; do
     --work) WORK="$2" ;;
     --docker-dir) DOCKER_DIR="$2" ;;
     --ignorefile) IGNOREFILE="$2" ;;
+    --registry) REGISTRY="$2" ;;
     *) usage >&2; die "unknown argument: $1" ;;
   esac
   shift 2
 done
-for required in REPO TAG REVISION WORK DOCKER_DIR IGNOREFILE; do
+for required in REPO TAG REVISION WORK DOCKER_DIR IGNOREFILE REGISTRY; do
   [ -n "${!required}" ] || { usage >&2; die "missing --$(echo "$required" | tr 'A-Z_' 'a-z-')"; }
 done
 case "$TAG" in v[0-9]*.[0-9]*.[0-9]*) ;; *) die "tag $TAG is not v<major>.<minor>.<patch>[-beta]" ;; esac
@@ -69,3 +72,6 @@ bash "$SCRIPT_DIR/build-server-images.sh" --artifacts "$ARTIFACTS" --out "$WORK/
 PLATFORMS="$(python3 -c 'import json,sys; print(",".join(json.load(open(sys.argv[1]))["platforms"]))' "$WORK/server/release.json")"
 bash "$SCRIPT_DIR/verify-server-images.sh" --dir "$WORK/server" --version "$VERSION" --tag "$IMAGE_TAG" \
   --platforms "$PLATFORMS" --ignorefile "$IGNOREFILE"
+
+bash "$SCRIPT_DIR/verify-server-charts.sh" --artifacts "$ARTIFACTS" --dir "$WORK/server" --tag "$IMAGE_TAG" \
+  --registry "$REGISTRY"
