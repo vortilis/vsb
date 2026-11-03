@@ -3,6 +3,12 @@
 # publish. Bump tag and digest together.
 FROM nginx:1.30.5-alpine@sha256:0985e772fb9f729e6fa0980da05fca5d9c468e870eed43071545afa9d2e27d94
 
+# The base's Alpine packages lag their security fixes (0.8.0: brotli-libs
+# CVE-2026-111497, fixed in the repository, not yet in any nginx image). The
+# release workflow builds the image once, scans that build and publishes it
+# unchanged, so the upgrade is part of what Trivy checks.
+RUN apk upgrade --no-cache
+
 # Replace the default site with SPA routing
 RUN rm /etc/nginx/conf.d/default.conf
 COPY nginx.conf /etc/nginx/conf.d/vorpilot.conf
