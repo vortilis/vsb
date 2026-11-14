@@ -2,11 +2,14 @@
 # build-server-images.sh — builds the VorPilot Server images from checked
 # release artifacts.
 #
-# Builds vorpilot-scout and vorpilot-frontend for the platforms in release.json,
-# each into an OCI image layout under --out with an SBOM and minimal provenance,
-# and records their digests in --out/release.json. Nothing is pushed:
-# verify-server-images.sh looks inside these layouts, publish-server-images.sh
-# ships exactly them.
+# Builds vorpilot-scout and vorpilot-frontend (Server Standard / Pro) and
+# vorpilot-scout-ce and vorpilot-frontend-ce (Server CE, the open-source build)
+# for the platforms in release.json, each into an OCI image layout under --out
+# with an SBOM and minimal provenance, and records their digests in
+# --out/release.json. Both editions use the same Dockerfiles: only the binary,
+# the bundle and the web UI's nginx site (nginx.conf / nginx-ce.conf) differ.
+# Nothing is pushed: verify-server-images.sh looks inside
+# these layouts, publish-server-release.sh ships exactly them.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -74,34 +77,59 @@ metadata_args() {
 }
 
 # The layout's own name is registry-neutral: the registry is chosen at publish.
+# --no-cache: the Dockerfiles install and upgrade the base's packages from the
+# distribution's repository, and a layer cached from an earlier build would
+# carry the packages of the day it was built. The release workflow builds on a clean runner; a
+# local verification before the draft is uploaded must see the same packages.
 build_layout() {
   local component="$1" dockerfile="$2" context="$3"
-  docker buildx build --platform "$PLATFORMS" -f "$dockerfile" "${METADATA[@]}" \
+  docker buildx build --no-cache --platform "$PLATFORMS" -f "$dockerfile" "${METADATA[@]}" \
     --sbom=true --provenance=mode=min \
     --output "type=oci,dest=$OUT/$component,tar=false,name=$IMAGE_PREFIX$component:$TAG" \
     "$context"
 }
 
-mkdir -p "$CONTEXT/scout" "$CONTEXT/frontend"
 IFS=',' read -r -a PLATFORM_LIST <<<"$PLATFORMS"
-for platform in "${PLATFORM_LIST[@]}"; do
-  cp "$ARTIFACTS/scout-${platform//\//-}" "$CONTEXT/scout/"
+
+# build_scout COMPONENT DESCRIPTION — Dockerfile.scout picks scout-linux-<arch>,
+# so each edition's binaries go into their own context under that name.
+build_scout() {
+  local component="$1" description="$2" platform
+  mkdir -p "$CONTEXT/$component"
+  for platform in "${PLATFORM_LIST[@]}"; do
+    cp "$ARTIFACTS/$component-${platform//\//-}" "$CONTEXT/$component/scout-${platform//\//-}"
+  done
+  cp "$DOCKER_DIR/Dockerfile.scout" "$CONTEXT/$component/"
+  metadata_args "$IMAGE_PREFIX$component" "$description"
+  build_layout "$component" "$CONTEXT/$component/Dockerfile.scout" "$CONTEXT/$component"
+}
+
+# build_frontend COMPONENT BUNDLE NGINX_CONF DESCRIPTION — the edition's site goes
+# into the context as nginx.conf, which Dockerfile.frontend copies.
+build_frontend() {
+  local component="$1" bundle="$2" nginx_conf="$3" description="$4"
+  mkdir -p "$CONTEXT/$component"
+  tar -xzf "$ARTIFACTS/$bundle" -C "$CONTEXT/$component"
+  mv "$CONTEXT/$component/dist-web" "$CONTEXT/$component/dist"
+  cp "$DOCKER_DIR/Dockerfile.frontend" "$CONTEXT/$component/"
+  cp "$DOCKER_DIR/$nginx_conf" "$CONTEXT/$component/nginx.conf"
+  metadata_args "$IMAGE_PREFIX$component" "$description"
+  build_layout "$component" "$CONTEXT/$component/Dockerfile.frontend" "$CONTEXT/$component"
+}
+
+build_scout scout "VorPilot Server backend"
+build_frontend frontend frontend-dist.tar.gz nginx.conf "VorPilot Server web UI"
+build_scout scout-ce "VorPilot Server CE backend"
+build_frontend frontend-ce frontend-ce-dist.tar.gz nginx-ce.conf "VorPilot Server CE web UI"
+
+COMPONENTS=(scout frontend scout-ce frontend-ce)
+IMAGE_ARGS=()
+for component in "${COMPONENTS[@]}"; do
+  IMAGE_ARGS+=(--image "$component=$IMAGE_PREFIX$component=$OUT/$component")
 done
-cp "$DOCKER_DIR/Dockerfile.scout" "$CONTEXT/scout/"
-metadata_args "${IMAGE_PREFIX}scout" "VorPilot Server backend"
-build_layout scout "$CONTEXT/scout/Dockerfile.scout" "$CONTEXT/scout"
-
-tar -xzf "$ARTIFACTS/frontend-dist.tar.gz" -C "$CONTEXT/frontend"
-mv "$CONTEXT/frontend/dist-web" "$CONTEXT/frontend/dist"
-cp "$DOCKER_DIR/Dockerfile.frontend" "$DOCKER_DIR/nginx.conf" "$CONTEXT/frontend/"
-metadata_args "${IMAGE_PREFIX}frontend" "VorPilot Server web UI"
-build_layout frontend "$CONTEXT/frontend/Dockerfile.frontend" "$CONTEXT/frontend"
-
-python3 "$CHECKS" record-images --dir "$OUT" --tag "$TAG" \
-  --image "scout=${IMAGE_PREFIX}scout=$OUT/scout" \
-  --image "frontend=${IMAGE_PREFIX}frontend=$OUT/frontend"
+python3 "$CHECKS" record-images --dir "$OUT" --tag "$TAG" "${IMAGE_ARGS[@]}"
 
 echo "Built $TAG for $PLATFORMS:"
-for component in scout frontend; do
+for component in "${COMPONENTS[@]}"; do
   echo "   $IMAGE_PREFIX$component  $(python3 "$CHECKS" digest --layout "$OUT/$component" --tag "$TAG")"
 done

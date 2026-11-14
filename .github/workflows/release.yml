@@ -1,20 +1,22 @@
-# Builds, checks, publishes and signs the VorPilot Server images and Helm charts.
+# Builds, checks, publishes and signs the VorPilot Server images and Helm charts:
+# Server Standard / Pro (vorpilot-scout, vorpilot-frontend) and Server CE, the
+# open-source build (vorpilot-scout-ce, vorpilot-frontend-ce), from one release.
 #
-# Release: a tag v<version> or v<version>-beta pushed onto a commit of main.
+# Release: a tag v<version> pushed onto a commit of main.
 # A release of the same name must already exist as a draft carrying the
 # pre-built artifacts and chart packages. The build job builds the images from
 # those artifacts, checks images and charts (a chart of version X runs the
 # images tagged X) and keeps the checked result as an artifact of the run. The
 # release job publishes exactly that result: it pushes images and charts to
-# ghcr.io/vortilis, signs them keyless, attests their provenance and only then
-# publishes the release.
+# ghcr.io/vortilis and signs them keyless. The attest job attests the
+# provenance of each image and chart, and the publish job only then publishes
+# the release.
 #
-# The two jobs are split so that a release job that fails after publishing can
-# be finished with "Re-run failed jobs": the rerun takes the same checked
-# images instead of building new ones, finds them and their signatures already
-# published, and goes on with what is missing. "Re-run all jobs" builds new
-# images, and publishing then refuses them: a published version is never
-# overwritten.
+# The jobs are split so that a run that fails after publishing can be finished
+# with "Re-run failed jobs": the rerun takes the same checked images instead of
+# building new ones, finds them and their signatures already published, and
+# goes on with what is missing. "Re-run all jobs" builds new images, and
+# publishing then refuses them: a published version is never overwritten.
 #
 # Rehearsal: run this workflow by hand from main with the draft's tag. It runs
 # the build job and checks that its result reaches a later job unchanged; it
@@ -29,7 +31,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Draft release to rehearse, e.g. v0.6.0-beta. Builds and checks; never publishes.
+        description: Draft release to rehearse, e.g. v0.9.0. Builds and checks; never publishes.
         required: true
         type: string
 
@@ -123,13 +125,21 @@ jobs:
     runs-on: ubuntu-24.04
     environment: release
     permissions:
-      contents: write # read the draft, publish it
+      contents: write # read the draft, upload images.txt to it
       packages: write # push to ghcr.io/vortilis
-      id-token: write # keyless signing and attestations
-      attestations: write
+      id-token: write # keyless signing
     env:
       GH_TOKEN: ${{ github.token }}
       RELEASE_TAG: ${{ github.ref_name }}
+    # The published digests, one per image and chart, for the attest job.
+    outputs:
+      SCOUT_DIGEST: ${{ steps.publish.outputs.SCOUT_DIGEST }}
+      FRONTEND_DIGEST: ${{ steps.publish.outputs.FRONTEND_DIGEST }}
+      SCOUT_CE_DIGEST: ${{ steps.publish.outputs.SCOUT_CE_DIGEST }}
+      FRONTEND_CE_DIGEST: ${{ steps.publish.outputs.FRONTEND_CE_DIGEST }}
+      SERVER_CHART_DIGEST: ${{ steps.publish.outputs.SERVER_CHART_DIGEST }}
+      AGENT_CHART_DIGEST: ${{ steps.publish.outputs.AGENT_CHART_DIGEST }}
+      RBAC_BOOTSTRAP_CHART_DIGEST: ${{ steps.publish.outputs.RBAC_BOOTSTRAP_CHART_DIGEST }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -166,74 +176,70 @@ jobs:
           tools/publish-server-release.sh --dir work/server --tag "${RELEASE_TAG#v}" \
             --registry "$REGISTRY" --identity "$GITHUB_SERVER_URL/$GITHUB_WORKFLOW_REF"
           cat work/server/digests.env >>"$GITHUB_OUTPUT"
-      # Each attestation gets a second attempt: obtaining the OIDC token can
-      # time out for a moment, and everything is already published by then.
-      - id: attest-scout
-        continue-on-error: true
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        with:
-          subject-name: ${{ env.REGISTRY }}/vorpilot-scout
-          subject-digest: ${{ steps.publish.outputs.SCOUT_DIGEST }}
-          push-to-registry: true
-      - if: steps.attest-scout.outcome == 'failure'
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        with:
-          subject-name: ${{ env.REGISTRY }}/vorpilot-scout
-          subject-digest: ${{ steps.publish.outputs.SCOUT_DIGEST }}
-          push-to-registry: true
-      - id: attest-frontend
-        continue-on-error: true
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        with:
-          subject-name: ${{ env.REGISTRY }}/vorpilot-frontend
-          subject-digest: ${{ steps.publish.outputs.FRONTEND_DIGEST }}
-          push-to-registry: true
-      - if: steps.attest-frontend.outcome == 'failure'
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        with:
-          subject-name: ${{ env.REGISTRY }}/vorpilot-frontend
-          subject-digest: ${{ steps.publish.outputs.FRONTEND_DIGEST }}
-          push-to-registry: true
-      - id: attest-server-chart
-        continue-on-error: true
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        with:
-          subject-name: ${{ env.REGISTRY }}/charts/vorpilot-server
-          subject-digest: ${{ steps.publish.outputs.SERVER_CHART_DIGEST }}
-          push-to-registry: true
-      - if: steps.attest-server-chart.outcome == 'failure'
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        with:
-          subject-name: ${{ env.REGISTRY }}/charts/vorpilot-server
-          subject-digest: ${{ steps.publish.outputs.SERVER_CHART_DIGEST }}
-          push-to-registry: true
-      - id: attest-agent-chart
-        continue-on-error: true
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        with:
-          subject-name: ${{ env.REGISTRY }}/charts/vorpilot-agent
-          subject-digest: ${{ steps.publish.outputs.AGENT_CHART_DIGEST }}
-          push-to-registry: true
-      - if: steps.attest-agent-chart.outcome == 'failure'
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        with:
-          subject-name: ${{ env.REGISTRY }}/charts/vorpilot-agent
-          subject-digest: ${{ steps.publish.outputs.AGENT_CHART_DIGEST }}
-          push-to-registry: true
-      - id: attest-rbac-bootstrap-chart
-        continue-on-error: true
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        with:
-          subject-name: ${{ env.REGISTRY }}/charts/vorpilot-rbac-bootstrap
-          subject-digest: ${{ steps.publish.outputs.RBAC_BOOTSTRAP_CHART_DIGEST }}
-          push-to-registry: true
-      - if: steps.attest-rbac-bootstrap-chart.outcome == 'failure'
-        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        with:
-          subject-name: ${{ env.REGISTRY }}/charts/vorpilot-rbac-bootstrap
-          subject-digest: ${{ steps.publish.outputs.RBAC_BOOTSTRAP_CHART_DIGEST }}
-          push-to-registry: true
-      - name: Publish the release
+      - name: Attach images.txt to the draft
+        run: gh release upload "$RELEASE_TAG" work/server/images.txt --clobber --repo "$GITHUB_REPOSITORY"
+
+  # One leg per published image and chart; a failed leg is finished by
+  # "Re-run failed jobs" without touching the others.
+  attest:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: release
+    runs-on: ubuntu-24.04
+    environment: release
+    permissions:
+      contents: read
+      packages: write # push the attestation next to the subject
+      id-token: write # keyless attestation
+      attestations: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { subject: vorpilot-scout, digest: SCOUT_DIGEST }
+          - { subject: vorpilot-frontend, digest: FRONTEND_DIGEST }
+          - { subject: vorpilot-scout-ce, digest: SCOUT_CE_DIGEST }
+          - { subject: vorpilot-frontend-ce, digest: FRONTEND_CE_DIGEST }
+          - { subject: charts/vorpilot-server, digest: SERVER_CHART_DIGEST }
+          - { subject: charts/vorpilot-agent, digest: AGENT_CHART_DIGEST }
+          - { subject: charts/vorpilot-rbac-bootstrap, digest: RBAC_BOOTSTRAP_CHART_DIGEST }
+    steps:
+      - name: Refuse a missing digest
+        env:
+          DIGEST: ${{ needs.release.outputs[matrix.digest] }}
+          SUBJECT: ${{ matrix.subject }}
         run: |
-          gh release upload "$RELEASE_TAG" work/server/images.txt --clobber --repo "$GITHUB_REPOSITORY"
-          gh release edit "$RELEASE_TAG" --draft=false --repo "$GITHUB_REPOSITORY"
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] \
+            || { echo "::error::no published digest for $SUBJECT"; exit 1; }
+      - name: Log in to GHCR
+        run: echo "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      # A second attempt: obtaining the OIDC token can time out for a moment,
+      # and everything is already published by then.
+      - id: attest
+        continue-on-error: true
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ matrix.subject }}
+          subject-digest: ${{ needs.release.outputs[matrix.digest] }}
+          push-to-registry: true
+      - if: steps.attest.outcome == 'failure'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ matrix.subject }}
+          subject-digest: ${{ needs.release.outputs[matrix.digest] }}
+          push-to-registry: true
+
+  publish:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: attest
+    runs-on: ubuntu-24.04
+    environment: release
+    permissions:
+      contents: write # publish the draft
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ github.ref_name }}
+    steps:
+      - name: Publish the release
+        run: gh release edit "$RELEASE_TAG" --draft=false --repo "$GITHUB_REPOSITORY"

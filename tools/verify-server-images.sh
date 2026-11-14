@@ -3,11 +3,13 @@
 # VorPilot Server images, run right before publishing so that what ships has
 # been checked against the day's vulnerability data.
 #
-# Per image, against the expectations derived from the release tag:
+# Per image (Server Standard / Pro and Server CE), against the expectations
+# derived from the release tag:
 #   - the platform set is exactly the one given, each with an SBOM;
 #   - the version label is the publish tag;
-#   - the version and the service endpoint are compiled into the image files
-#     (release_checks.py inspect);
+#   - the version and the markers are compiled into the image files: the
+#     licensing endpoint in Standard / Pro, none in CE, whose Scout names its
+#     main package in its build info (release_checks.py inspect);
 #   - Trivy finds no CRITICAL vulnerability that has a fix. Accepted exceptions
 #     live in trivyignore.yaml, each with a statement. HIGH and CRITICAL are
 #     written to trivy/<image>-<os>-<arch>.txt either way.
@@ -43,16 +45,17 @@ done
 [ -f "$IGNOREFILE" ] || die "$IGNOREFILE not found"
 command -v trivy >/dev/null 2>&1 || die "trivy not found"
 
+COMPONENTS=(scout frontend scout-ce frontend-ce)
 failed=0
 echo "Verifying images $TAG in $DIR"
-for component in scout frontend; do
+for component in "${COMPONENTS[@]}"; do
   python3 "$CHECKS" inspect --component "$component" --layout "$DIR/$component" --tag "$TAG" \
     --version "$VERSION" --platforms "$PLATFORMS" || failed=1
 done
 
 mkdir -p "$DIR/trivy"
 IFS=',' read -r -a PLATFORM_LIST <<<"$PLATFORMS"
-for component in scout frontend; do
+for component in "${COMPONENTS[@]}"; do
   for platform in "${PLATFORM_LIST[@]}"; do
     report="$DIR/trivy/$component-${platform//\//-}.txt"
     trivy image --input "$DIR/$component" --platform "$platform" --quiet --scanners vuln \

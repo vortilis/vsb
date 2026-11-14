@@ -1,10 +1,12 @@
-# VorPilot Server backend image around a pre-built binary.
+# VorPilot Server backend image around a pre-built binary — the Server
+# Standard / Pro image and the Server CE image alike.
 # The build context holds scout-linux-<arch> for every platform being built.
-# Cluster credentials are provided at runtime (see the Helm chart). The same
-# binary serves the hub, the agent tunnel gateway and the cluster agent.
+# Cluster credentials are provided at runtime (see the Helm chart). The
+# Standard / Pro binary serves the hub, the agent tunnel gateway and the cluster
+# agent; the CE binary serves the hub alone.
 # Pinned by index digest, so the base cannot change between a scan and a
 # publish. Bump tag and digest together.
-FROM alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+FROM alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
 
 RUN apk add --no-cache ca-certificates tzdata
 

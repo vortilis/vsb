@@ -7,7 +7,7 @@
 # Nothing is rebuilt, so the registry digest is the digest that was checked.
 # Per image:
 #   1. refuse unless publishable (release_checks.py check-publishable): a
-#      release or beta tag, layouts unchanged since they were recorded;
+#      release tag, layouts unchanged since they were recorded;
 #   2. tags are immutable: same digest already there → skip the copy (a re-run
 #      after a failed signature), another digest → refuse. Only a registry
 #      answer of "no such tag" counts as absent; any other error stops the run
@@ -15,8 +15,8 @@
 #   3. copy with regctl and re-read the remote digest;
 #   4. sign the digest keyless (--recursive: the index and every platform
 #      manifest), then verify it against this workflow's identity;
-#   5. release channel only: move `latest` to this version unless a newer
-#      version already holds it — latest never moves back, beta never touches it.
+#   5. move `latest` to this version unless a newer version already holds it —
+#      latest never moves back.
 # Then per chart (<dir>/charts/<chart>-<tag>.tgz, verify-server-charts.sh):
 #   1. the same immutability: a chart tag already there must hold this very
 #      package (its layer is the package's sha256), otherwise refuse;
@@ -24,9 +24,9 @@
 #   3. sign keyless and verify, as for the images.
 # Charts have no `latest`: Helm resolves the newest version itself.
 # Writes images.txt (these images, the charts and the third-party images, by
-# digest) and digests.env (SCOUT_DIGEST=…, FRONTEND_DIGEST=…,
-# SERVER_CHART_DIGEST=…, AGENT_CHART_DIGEST=…, RBAC_BOOTSTRAP_CHART_DIGEST=…)
-# for attestation.
+# digest) and digests.env (SCOUT_DIGEST=…, FRONTEND_DIGEST=…, SCOUT_CE_DIGEST=…,
+# FRONTEND_CE_DIGEST=…, SERVER_CHART_DIGEST=…, AGENT_CHART_DIGEST=…,
+# RBAC_BOOTSTRAP_CHART_DIGEST=…) for attestation.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -134,6 +134,8 @@ while read -r component name digest; do
     echo "   ✓ $pinned signed and verified"
   fi
 
+  # check-publishable admits only release tags, so this always holds; kept so a channel
+  # added later cannot move latest by accident.
   if [ "$CHANNEL" = release ]; then
     current="$(latest_version "$REGISTRY/$name:latest")" || exit 2
     newest="$(printf '%s\n%s\n' "$current" "$TAG" | sed '/^$/d' | sort -V | tail -1)"
@@ -146,7 +148,7 @@ while read -r component name digest; do
   fi
 
   echo "$reference@$digest" >>"$TMP_ROOT/images.txt"
-  echo "$(echo "$component" | tr 'a-z' 'A-Z')_DIGEST=$digest" >>"$TMP_ROOT/digests.env"
+  echo "$(echo "$component" | tr 'a-z-' 'A-Z_')_DIGEST=$digest" >>"$TMP_ROOT/digests.env"
 done <<<"$ROWS"
 
 # The layer digests of a chart manifest, one per line (Helm pushes the

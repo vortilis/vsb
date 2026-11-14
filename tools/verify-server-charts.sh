@@ -7,7 +7,9 @@
 # For each chart package of the release:
 #   1. name, version and appVersion are the release tag — bundled subcharts too;
 #   2. helm lint, then helm template with default values: the release's own
-#      images render as exactly <registry>/<name>:<tag>.
+#      images render as exactly <registry>/<name>:<tag>. The server chart is
+#      rendered a second time as Server CE (scout.ce=true): then it runs the CE
+#      images and none of the Standard / Pro ones.
 # Copies the checked packages to <dir>/charts/ for publish-server-release.sh.
 set -euo pipefail
 
@@ -52,7 +54,8 @@ for chart in "${CHARTS[@]}"; do
   python3 "$CHECKS" check-chart --chart "$ARTIFACTS/$package" --name "$chart" --tag "$TAG" || exit 1
   case "$chart" in
     vorpilot-server)
-      expect=(--image "$REGISTRY/vorpilot-scout" --image "$REGISTRY/vorpilot-frontend")
+      expect=(--image "$REGISTRY/vorpilot-scout" --image "$REGISTRY/vorpilot-frontend"
+              --absent "$REGISTRY/vorpilot-scout-ce" --absent "$REGISTRY/vorpilot-frontend-ce")
       values=() ;;
     vorpilot-agent)
       expect=(--image "$REGISTRY/vorpilot-scout")
@@ -66,6 +69,14 @@ for chart in "${CHARTS[@]}"; do
   helm template "$chart" "$DIR/charts/$package" ${values[@]+"${values[@]}"} >"$DIR/charts/$chart.yaml"
   python3 "$CHECKS" check-rendered --manifest "$DIR/charts/$chart.yaml" --tag "$TAG" ${expect[@]+"${expect[@]}"} \
     || failed=1
+  if [ "$chart" = vorpilot-server ]; then
+    # A deployment without a licence is Server CE; the chart asks for it explicitly.
+    helm template "$chart" "$DIR/charts/$package" --set scout.ce=true --set-string scout.licensingRequired=false \
+      >"$DIR/charts/$chart-ce.yaml"
+    python3 "$CHECKS" check-rendered --manifest "$DIR/charts/$chart-ce.yaml" --tag "$TAG" \
+      --image "$REGISTRY/vorpilot-scout-ce" --image "$REGISTRY/vorpilot-frontend-ce" \
+      --absent "$REGISTRY/vorpilot-scout" --absent "$REGISTRY/vorpilot-frontend" || failed=1
+  fi
 done
 [ "$failed" -eq 0 ] || { echo "Chart checks failed — nothing is published." >&2; exit 1; }
 echo "Charts $TAG checked."

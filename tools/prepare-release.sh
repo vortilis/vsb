@@ -5,21 +5,22 @@
 #   1. download the assets of the release tagged --tag (normally still a draft,
 #      visible only with write access) into <work>/artifacts;
 #   2. check them: checksums, release.json against the tag, version and
-#      endpoint inside the binaries and the web UI bundle, the chart packages;
+#      markers inside the binaries and the web UI bundles of both editions,
+#      the chart packages;
 #   3. build the images into <work>/server (build-server-images.sh);
 #   4. check the images (verify-server-images.sh);
 #   5. check the charts (verify-server-charts.sh): version, lint, the release's
 #      images by tag.
 #
-# The tag names everything: v<version> → release channel, v<version>-beta →
-# beta. Needs gh (GH_TOKEN), docker buildx, trivy, helm and python3.
+# The tag names everything: v<version> is a release. Needs gh (GH_TOKEN), docker
+# buildx, trivy, helm and python3.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CHECKS="$SCRIPT_DIR/release_checks.py"
 
 usage() {
-  echo "Usage: prepare-release.sh --repo OWNER/NAME --tag vX.Y.Z[-beta] --revision SHA --work DIR --docker-dir DIR --ignorefile FILE --registry HOST/NAMESPACE"
+  echo "Usage: prepare-release.sh --repo OWNER/NAME --tag vX.Y.Z --revision SHA --work DIR --docker-dir DIR --ignorefile FILE --registry HOST/NAMESPACE"
 }
 
 die() { echo "error: $*" >&2; exit 2; }
@@ -43,9 +44,9 @@ done
 for required in REPO TAG REVISION WORK DOCKER_DIR IGNOREFILE REGISTRY; do
   [ -n "${!required}" ] || { usage >&2; die "missing --$(echo "$required" | tr 'A-Z_' 'a-z-')"; }
 done
-case "$TAG" in v[0-9]*.[0-9]*.[0-9]*) ;; *) die "tag $TAG is not v<major>.<minor>.<patch>[-beta]" ;; esac
+[[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "tag $TAG is not v<major>.<minor>.<patch>"
 IMAGE_TAG="${TAG#v}"
-VERSION="${IMAGE_TAG%%-*}"
+VERSION="$IMAGE_TAG"
 
 ARTIFACTS="$WORK/artifacts"
 rm -rf "$WORK"

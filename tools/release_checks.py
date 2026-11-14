@@ -2,18 +2,23 @@
 """Checks for VorPilot Server release builds.
 
 A release starts as a set of pre-built artifacts, described by release.json and
-listed in checksums.txt: binaries, the web UI bundle and the Helm chart
+listed in checksums.txt: binaries, the web UI bundles and the Helm chart
 packages. The release workflow checks them, builds the images into OCI image
 layouts, checks the images and the charts, and publishes exactly those layouts
 and packages. A chart of version X runs the images tagged X. Everything is
-read with the standard library, straight from the files:
+read with the standard library, straight from the files.
+
+Two editions ship from one release: Server Standard / Pro (scout, frontend)
+and Server CE (scout-ce, frontend-ce), the open-source build. The CE images
+talk to no licensing service, so they must carry none of its endpoints; the CE
+Scout keeps its Go build info, which names its main package.
 
   check-artifacts    checksums, release.json against the tag, the version and
-                     service endpoint compiled into the binaries and the web UI
-                     bundle, and the chart packages' names and versions
+                     the markers compiled into the binaries and the web UI
+                     bundles, and the chart packages' names and versions
   digest             index digest of a tag in an OCI layout
   inspect            one image layout: platform set, SBOM per platform,
-                     version label, version and endpoint inside the files
+                     version label, version and markers inside the files
   record-images      add the digests of the built layouts to release.json
   check-publishable  tag and channel rules, layouts unchanged since recorded;
                      prints "<component> <name> <digest>" per image
@@ -21,7 +26,7 @@ read with the standard library, straight from the files:
                      chart and of every bundled subchart
   yaml-set           set scalars in a YAML file in place, keeping its comments
   check-rendered     the release's own images in a rendered chart are exactly
-                     <repository>:<tag>
+                     <repository>:<tag>, and the absent ones are absent
   file-digest        sha256 of a file, as a registry names a layer
 """
 
@@ -40,28 +45,38 @@ REF_NAME = "org.opencontainers.image.ref.name"
 VERSION_LABEL = "org.opencontainers.image.version"
 SPDX_PREDICATE = "https://spdx.dev/Document"
 
-# Every published build talks to these endpoints; a build that lacks them was
-# made for something else.
+# Every published Server Standard / Pro build talks to these endpoints; a build
+# that lacks them was made for something else.
 PRODUCTION_MARKERS = {
     "scout": "https://api.vortilis.com/license",
     "frontend": "https://lic.vortilis.com",
 }
 
-# Files whose bytes must hold the version and the endpoint, as paths inside the
+# The Server CE Scout's Go build info names its main package: the open-source
+# command, not another binary under its name.
+CE_SCOUT_PATH = "path\tvortilis.com/vorpilot/cmd/scout\n"
+
+# Image components: the Scout binaries, then the web UI bundles.
+SCOUTS = ("scout", "scout-ce")
+BUNDLES = {"frontend": "frontend-dist.tar.gz", "frontend-ce": "frontend-ce-dist.tar.gz"}
+COMPONENTS = SCOUTS + tuple(BUNDLES)
+
+# Files whose bytes must hold the version and the markers, as paths inside the
 # image without the leading slash. Bundle chunks are content-hashed, so they are
 # matched by pattern and searched together.
 COMPONENT_FILES = {
     "scout": "usr/local/bin/scout",
+    "scout-ce": "usr/local/bin/scout",
     "frontend": "usr/share/nginx/html/assets/*.js",
+    "frontend-ce": "usr/share/nginx/html/assets/*.js",
 }
 
 # Artifact names are flat: they travel as release assets.
-FRONTEND_BUNDLE = "frontend-dist.tar.gz"
 BUNDLE_CHUNKS = "dist-web/assets/*.js"
 RECORD = "release.json"
 CHECKSUMS = "checksums.txt"
 THIRD_PARTY = "third-party-images.txt"
-PUBLISHED_CHANNELS = ("release", "beta")
+PUBLISHED_CHANNELS = ("release",)
 # Published as oci://<registry>/charts/<name>, versioned with the release tag.
 CHARTS = ("vorpilot-server", "vorpilot-agent", "vorpilot-rbac-bootstrap")
 
@@ -70,8 +85,8 @@ class CheckError(Exception):
     """A check failed; the message is what the operator needs to read."""
 
 
-def scout_binary(platform: str) -> str:
-    return "scout-" + platform.replace("/", "-")
+def scout_binary(platform: str, component: str = "scout") -> str:
+    return f"{component}-" + platform.replace("/", "-")
 
 
 def chart_package(name: str, tag: str) -> str:
@@ -80,8 +95,23 @@ def chart_package(name: str, tag: str) -> str:
 
 def artifact_names(platforms: list[str], tag: str) -> list[str]:
     """Every artifact of a release besides checksums.txt itself."""
-    return sorted([scout_binary(p) for p in platforms] + [chart_package(c, tag) for c in CHARTS]
-                  + [FRONTEND_BUNDLE, RECORD, THIRD_PARTY])
+    return sorted([scout_binary(p, scout) for scout in SCOUTS for p in platforms]
+                  + [chart_package(c, tag) for c in CHARTS] + list(BUNDLES.values()) + [RECORD, THIRD_PARTY])
+
+
+def content_markers(endpoints: dict, other_tiers: tuple = ()) -> tuple[dict, dict]:
+    """(required, forbidden) markers per component for a build of the tier whose
+    licensing endpoints are given: Standard / Pro carries its own tier's endpoint
+    and no other tier's; CE carries no endpoint of any tier, and its Scout names
+    its main package."""
+    every_endpoint = tuple(markers[component] for markers in (endpoints, *other_tiers)
+                           for component in ("scout", "frontend"))
+    required = {"scout": (endpoints["scout"],), "frontend": (endpoints["frontend"],),
+                "scout-ce": (CE_SCOUT_PATH,), "frontend-ce": ()}
+    forbidden = {"scout": tuple(markers["scout"] for markers in other_tiers),
+                 "frontend": tuple(markers["frontend"] for markers in other_tiers),
+                 "scout-ce": every_endpoint, "frontend-ce": every_endpoint}
+    return required, forbidden
 
 
 def channel_of(tag: str) -> str:
@@ -118,18 +148,32 @@ def checksum_failures(directory: Path, expected: list[str]) -> list[str]:
     return failures
 
 
-def content_failures(where: str, content: bytes, version: str, expected: str,
+def describe_marker(marker: str) -> str:
+    if marker.startswith("path\t"):
+        return "build info path " + marker.split("\t", 1)[1].strip()
+    return f"endpoint {marker}"
+
+
+def has_version(content: bytes, version: str) -> bool:
+    """The release's own version string, not a dependency's: a Go binary with
+    build info lists its modules as v<version> (in the module list and in file
+    paths, @v<version>/), so an occurrence right after a "v" does not count."""
+    return re.search(rb"(?<!v)" + re.escape(version.encode()), content) is not None
+
+
+def content_failures(where: str, content: bytes, version: str, expected: tuple[str, ...],
                      forbidden: tuple[str, ...] = ()) -> list[str]:
     failures = []
     # One-directional: a build of another version does not contain this
     # version's string.
-    if version.encode() not in content:
+    if not has_version(content, version):
         failures.append(f"{where}: version {version} not found")
-    if expected.encode() not in content:
-        failures.append(f"{where}: endpoint {expected} not found")
+    for marker in expected:
+        if marker.encode() not in content:
+            failures.append(f"{where}: {describe_marker(marker)} not found")
     for marker in forbidden:
         if marker.encode() in content:
-            failures.append(f"{where}: unexpected endpoint {marker} compiled in")
+            failures.append(f"{where}: unexpected {describe_marker(marker)} compiled in")
     return failures
 
 
@@ -144,20 +188,20 @@ def bundle_chunks(bundle: Path) -> bytes:
 
 
 def artifact_content_failures(directory: Path, platforms: list[str], version: str,
-                              markers: dict, forbidden: dict | None = None) -> list[str]:
-    """Version and endpoint inside every binary and the bundle."""
-    forbidden = forbidden or {}
+                              required: dict, forbidden: dict) -> list[str]:
+    """Version and markers inside every binary and bundle (content_markers)."""
     failures = []
-    for platform in platforms:
-        name = scout_binary(platform)
-        failures += content_failures(name, (directory / name).read_bytes(), version,
-                                     markers["scout"], forbidden.get("scout", ()))
-    chunks = bundle_chunks(directory / FRONTEND_BUNDLE)
-    if not chunks:
-        failures.append(f"{FRONTEND_BUNDLE}: no files match {BUNDLE_CHUNKS}")
-    else:
-        failures += content_failures(FRONTEND_BUNDLE, chunks, version,
-                                     markers["frontend"], forbidden.get("frontend", ()))
+    for scout in SCOUTS:
+        for platform in platforms:
+            name = scout_binary(platform, scout)
+            failures += content_failures(name, (directory / name).read_bytes(), version,
+                                         required[scout], forbidden[scout])
+    for component, bundle in BUNDLES.items():
+        chunks = bundle_chunks(directory / bundle)
+        if not chunks:
+            failures.append(f"{bundle}: no files match {BUNDLE_CHUNKS}")
+        else:
+            failures += content_failures(bundle, chunks, version, required[component], forbidden[component])
     return failures
 
 
@@ -174,7 +218,7 @@ def tag_failures(record: dict, tag: str) -> list[str]:
     if record["tag"] != tag:
         failures.append(f"built as {record['tag']}, not {tag}")
     if channel_of(tag) not in PUBLISHED_CHANNELS:
-        failures.append(f"{tag} is not a release or beta tag")
+        failures.append(f"{tag} is not a release tag")
     elif record["channel"] != channel_of(tag):
         failures.append(f"recorded channel {record['channel']} does not match {tag}")
     return failures
@@ -188,7 +232,8 @@ def check_artifacts(directory: Path, tag: str, version: str) -> list[str]:
     failures += checksum_failures(directory, artifact_names(record["platforms"], tag))
     if failures:
         return failures  # contents of a mismatched set prove nothing
-    failures = artifact_content_failures(directory, record["platforms"], version, PRODUCTION_MARKERS)
+    failures = artifact_content_failures(directory, record["platforms"], version,
+                                         *content_markers(PRODUCTION_MARKERS))
     for chart in CHARTS:
         failures += check_chart(directory / chart_package(chart, tag), chart, tag)
     return failures
@@ -284,6 +329,7 @@ def inspect(component: str, layout: Layout, tag: str, version: str, platforms: l
     """Every check for one image; returns failure messages (empty = all good)."""
     index = layout.image_index(tag)
     manifests = image_manifests(index)
+    required, forbidden = content_markers(PRODUCTION_MARKERS)
     failures = []
     if sorted(manifests) != sorted(platforms):
         failures.append(f"{component}: platforms {sorted(manifests)}, expected {sorted(platforms)}")
@@ -299,7 +345,8 @@ def inspect(component: str, layout: Layout, tag: str, version: str, platforms: l
         if not files:
             failures.append(f"{where}: no files match {COMPONENT_FILES[component]}")
             continue
-        failures += content_failures(where, b"\0".join(files.values()), version, PRODUCTION_MARKERS[component])
+        failures += content_failures(where, b"\0".join(files.values()), version,
+                                     required[component], forbidden[component])
     return failures
 
 
@@ -324,6 +371,11 @@ def check_publishable(directory: Path, tag: str) -> list[tuple[str, str, str]]:
         raise CheckError("; ".join(failures))
     if not record.get("images"):
         raise CheckError(f"{directory / RECORD} records no images — build them first")
+    # Every image of the release, before the first push: a missing one would be
+    # noticed only after the others and the version's tags were published.
+    if sorted(record["images"]) != sorted(COMPONENTS):
+        raise CheckError(f"{directory / RECORD} records images {sorted(record['images'])}, "
+                         f"expected {sorted(COMPONENTS)}")
     rows = []
     for component, image in sorted(record["images"].items()):
         current = Layout(directory / image["layout"]).tag_descriptor(tag)["digest"]
@@ -512,10 +564,12 @@ def image_repository(reference: str) -> str:
     return base
 
 
-def rendered_image_failures(manifest: str, tag: str, repositories: list[str]) -> list[str]:
+def rendered_image_failures(manifest: str, tag: str, repositories: list[str],
+                            absent: tuple[str, ...] = ()) -> list[str]:
     """Each of the release's own repositories present in a rendered chart and
     every use of it exactly <repository>:<tag> — the chart runs the images of
-    its own version, by tag."""
+    its own version, by tag. The absent repositories must not appear at all:
+    Server CE runs none of the Standard / Pro images, and the other way round."""
     images = sorted(set(_IMAGE.findall(manifest)))
     failures = []
     for repository in sorted(repositories):
@@ -523,6 +577,9 @@ def rendered_image_failures(manifest: str, tag: str, repositories: list[str]) ->
         if not own:
             failures.append(f"{repository}: not in the rendered chart")
         failures += [f"{image}: expected {repository}:{tag}" for image in own if image != f"{repository}:{tag}"]
+    for repository in sorted(absent):
+        failures += [f"{image}: {repository} must not be rendered here" for image in images
+                     if image_repository(image) == repository]
     return failures
 
 
@@ -550,7 +607,7 @@ def main(argv: list[str]) -> int:
     digest.add_argument("--tag", required=True)
 
     check = sub.add_parser("inspect")
-    check.add_argument("--component", required=True, choices=sorted(PRODUCTION_MARKERS))
+    check.add_argument("--component", required=True, choices=COMPONENTS)
     for option in ("--layout", "--tag", "--version", "--platforms"):
         check.add_argument(option, required=True)
 
@@ -575,6 +632,7 @@ def main(argv: list[str]) -> int:
     rendered.add_argument("--manifest", required=True)
     rendered.add_argument("--tag", required=True)
     rendered.add_argument("--image", action="append", default=[], help="repository of this release, repeated")
+    rendered.add_argument("--absent", action="append", default=[], help="repository that must not appear, repeated")
 
     file_digest = sub.add_parser("file-digest")
     file_digest.add_argument("--file", required=True)
@@ -583,7 +641,7 @@ def main(argv: list[str]) -> int:
     try:
         if args.command == "check-artifacts":
             failures = check_artifacts(Path(args.dir), args.tag, args.version)
-            return report(failures, f"artifacts {args.tag} — checksums, version {args.version}, endpoints, charts")
+            return report(failures, f"artifacts {args.tag} — checksums, version {args.version}, markers, charts")
         if args.command == "check-chart":
             return report(check_chart(Path(args.chart), args.name, args.tag), f"{args.name} {args.tag}")
         if args.command == "yaml-set":
@@ -593,7 +651,8 @@ def main(argv: list[str]) -> int:
                 text = set_scalar(text, key, value)
             path.write_text(text)
         elif args.command == "check-rendered":
-            failures = rendered_image_failures(Path(args.manifest).read_text(), args.tag, args.image)
+            failures = rendered_image_failures(Path(args.manifest).read_text(), args.tag, args.image,
+                                               tuple(args.absent))
             return report(failures, f"{Path(args.manifest).name}: images of {args.tag}")
         elif args.command == "file-digest":
             print("sha256:" + sha256_file(Path(args.file)))
@@ -603,7 +662,7 @@ def main(argv: list[str]) -> int:
             failures = inspect(args.component, Layout(Path(args.layout)), args.tag, args.version,
                                args.platforms.split(","))
             return report(failures, f"{args.component} — {args.platforms}, version {args.version}, "
-                                    "endpoint, SBOM")
+                                    "markers, SBOM")
         elif args.command == "record-images":
             record_images(Path(args.dir), args.tag, args.image)
         elif args.command == "check-publishable":
