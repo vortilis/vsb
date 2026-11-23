@@ -1,6 +1,6 @@
 # Builds, checks, publishes and signs the VorPilot Server images and Helm charts:
-# Server Standard / Pro (vorpilot-scout, vorpilot-frontend) and Server CE, the
-# open-source build (vorpilot-scout-ce, vorpilot-frontend-ce), from one release.
+# Server Standard / Pro (vorpilot-scout, vorpilot-frontend). Server CE, the
+# open-source build, is released by the open-source repository itself.
 #
 # Release: a tag v<version> pushed onto a commit of main.
 # A release of the same name must already exist as a draft carrying the
@@ -135,8 +135,6 @@ jobs:
     outputs:
       SCOUT_DIGEST: ${{ steps.publish.outputs.SCOUT_DIGEST }}
       FRONTEND_DIGEST: ${{ steps.publish.outputs.FRONTEND_DIGEST }}
-      SCOUT_CE_DIGEST: ${{ steps.publish.outputs.SCOUT_CE_DIGEST }}
-      FRONTEND_CE_DIGEST: ${{ steps.publish.outputs.FRONTEND_CE_DIGEST }}
       SERVER_CHART_DIGEST: ${{ steps.publish.outputs.SERVER_CHART_DIGEST }}
       AGENT_CHART_DIGEST: ${{ steps.publish.outputs.AGENT_CHART_DIGEST }}
       RBAC_BOOTSTRAP_CHART_DIGEST: ${{ steps.publish.outputs.RBAC_BOOTSTRAP_CHART_DIGEST }}
@@ -199,8 +197,6 @@ jobs:
         include:
           - { subject: vorpilot-scout, digest: SCOUT_DIGEST }
           - { subject: vorpilot-frontend, digest: FRONTEND_DIGEST }
-          - { subject: vorpilot-scout-ce, digest: SCOUT_CE_DIGEST }
-          - { subject: vorpilot-frontend-ce, digest: FRONTEND_CE_DIGEST }
           - { subject: charts/vorpilot-server, digest: SERVER_CHART_DIGEST }
           - { subject: charts/vorpilot-agent, digest: AGENT_CHART_DIGEST }
           - { subject: charts/vorpilot-rbac-bootstrap, digest: RBAC_BOOTSTRAP_CHART_DIGEST }

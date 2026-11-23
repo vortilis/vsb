@@ -8,10 +8,8 @@ layouts, checks the images and the charts, and publishes exactly those layouts
 and packages. A chart of version X runs the images tagged X. Everything is
 read with the standard library, straight from the files.
 
-Two editions ship from one release: Server Standard / Pro (scout, frontend)
-and Server CE (scout-ce, frontend-ce), the open-source build. The CE images
-talk to no licensing service, so they must carry none of its endpoints; the CE
-Scout keeps its Go build info, which names its main package.
+A release ships Server Standard / Pro (scout, frontend). Server CE, the
+open-source build, is released from the open-source repository's own CI.
 
   check-artifacts    checksums, release.json against the tag, the version and
                      the markers compiled into the binaries and the web UI
@@ -52,13 +50,9 @@ PRODUCTION_MARKERS = {
     "frontend": "https://lic.vortilis.com",
 }
 
-# The Server CE Scout's Go build info names its main package: the open-source
-# command, not another binary under its name.
-CE_SCOUT_PATH = "path\tvortilis.com/vorpilot/cmd/scout\n"
-
 # Image components: the Scout binaries, then the web UI bundles.
-SCOUTS = ("scout", "scout-ce")
-BUNDLES = {"frontend": "frontend-dist.tar.gz", "frontend-ce": "frontend-ce-dist.tar.gz"}
+SCOUTS = ("scout",)
+BUNDLES = {"frontend": "frontend-dist.tar.gz"}
 COMPONENTS = SCOUTS + tuple(BUNDLES)
 
 # Files whose bytes must hold the version and the markers, as paths inside the
@@ -66,9 +60,7 @@ COMPONENTS = SCOUTS + tuple(BUNDLES)
 # matched by pattern and searched together.
 COMPONENT_FILES = {
     "scout": "usr/local/bin/scout",
-    "scout-ce": "usr/local/bin/scout",
     "frontend": "usr/share/nginx/html/assets/*.js",
-    "frontend-ce": "usr/share/nginx/html/assets/*.js",
 }
 
 # Artifact names are flat: they travel as release assets.
@@ -101,16 +93,10 @@ def artifact_names(platforms: list[str], tag: str) -> list[str]:
 
 def content_markers(endpoints: dict, other_tiers: tuple = ()) -> tuple[dict, dict]:
     """(required, forbidden) markers per component for a build of the tier whose
-    licensing endpoints are given: Standard / Pro carries its own tier's endpoint
-    and no other tier's; CE carries no endpoint of any tier, and its Scout names
-    its main package."""
-    every_endpoint = tuple(markers[component] for markers in (endpoints, *other_tiers)
-                           for component in ("scout", "frontend"))
-    required = {"scout": (endpoints["scout"],), "frontend": (endpoints["frontend"],),
-                "scout-ce": (CE_SCOUT_PATH,), "frontend-ce": ()}
+    licensing endpoints are given: its own tier's endpoint and no other tier's."""
+    required = {"scout": (endpoints["scout"],), "frontend": (endpoints["frontend"],)}
     forbidden = {"scout": tuple(markers["scout"] for markers in other_tiers),
-                 "frontend": tuple(markers["frontend"] for markers in other_tiers),
-                 "scout-ce": every_endpoint, "frontend-ce": every_endpoint}
+                 "frontend": tuple(markers["frontend"] for markers in other_tiers)}
     return required, forbidden
 
 
@@ -149,8 +135,6 @@ def checksum_failures(directory: Path, expected: list[str]) -> list[str]:
 
 
 def describe_marker(marker: str) -> str:
-    if marker.startswith("path\t"):
-        return "build info path " + marker.split("\t", 1)[1].strip()
     return f"endpoint {marker}"
 
 

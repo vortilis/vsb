@@ -1,7 +1,7 @@
 # VorPilot Server web UI: a pre-built static bundle (dist/) served by nginx.
 # Pinned by index digest, so the base cannot change between a scan and a
 # publish. Bump tag and digest together.
-FROM nginx:1.30.6-alpine@sha256:583b7f2fce1cdb8da5ad5c39ebd3c33b98b87d493190e548bdee1fa8c619c311
+FROM nginx:1.30.7-alpine@sha256:caf4e1e032a20f9c3c5e28fc7f25ffd768ad8677b4975c54193075997b3a97e3
 
 # The base's Alpine packages lag their security fixes (0.8.0: brotli-libs
 # CVE-2026-111497, fixed in the repository, not yet in any nginx image). The

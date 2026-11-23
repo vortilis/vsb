@@ -24,9 +24,9 @@
 #   3. sign keyless and verify, as for the images.
 # Charts have no `latest`: Helm resolves the newest version itself.
 # Writes images.txt (these images, the charts and the third-party images, by
-# digest) and digests.env (SCOUT_DIGEST=…, FRONTEND_DIGEST=…, SCOUT_CE_DIGEST=…,
-# FRONTEND_CE_DIGEST=…, SERVER_CHART_DIGEST=…, AGENT_CHART_DIGEST=…,
-# RBAC_BOOTSTRAP_CHART_DIGEST=…) for attestation.
+# digest) and digests.env (SCOUT_DIGEST=…, FRONTEND_DIGEST=…,
+# SERVER_CHART_DIGEST=…, AGENT_CHART_DIGEST=…, RBAC_BOOTSTRAP_CHART_DIGEST=…)
+# for attestation.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

@@ -2,12 +2,10 @@
 # build-server-images.sh — builds the VorPilot Server images from checked
 # release artifacts.
 #
-# Builds vorpilot-scout and vorpilot-frontend (Server Standard / Pro) and
-# vorpilot-scout-ce and vorpilot-frontend-ce (Server CE, the open-source build)
-# for the platforms in release.json, each into an OCI image layout under --out
-# with an SBOM and minimal provenance, and records their digests in
-# --out/release.json. Both editions use the same Dockerfiles: only the binary,
-# the bundle and the web UI's nginx site (nginx.conf / nginx-ce.conf) differ.
+# Builds vorpilot-scout and vorpilot-frontend (Server Standard / Pro) for the
+# platforms in release.json, each into an OCI image layout under --out with an
+# SBOM and minimal provenance, and records their digests in --out/release.json.
+# Server CE's images come from the open-source repository's own CI.
 # Nothing is pushed: verify-server-images.sh looks inside
 # these layouts, publish-server-release.sh ships exactly them.
 set -euo pipefail
@@ -92,7 +90,7 @@ build_layout() {
 IFS=',' read -r -a PLATFORM_LIST <<<"$PLATFORMS"
 
 # build_scout COMPONENT DESCRIPTION — Dockerfile.scout picks scout-linux-<arch>,
-# so each edition's binaries go into their own context under that name.
+# so the binaries go into the component's context under that name.
 build_scout() {
   local component="$1" description="$2" platform
   mkdir -p "$CONTEXT/$component"
@@ -104,8 +102,8 @@ build_scout() {
   build_layout "$component" "$CONTEXT/$component/Dockerfile.scout" "$CONTEXT/$component"
 }
 
-# build_frontend COMPONENT BUNDLE NGINX_CONF DESCRIPTION — the edition's site goes
-# into the context as nginx.conf, which Dockerfile.frontend copies.
+# build_frontend COMPONENT BUNDLE NGINX_CONF DESCRIPTION — the site goes into the
+# context as nginx.conf, which Dockerfile.frontend copies.
 build_frontend() {
   local component="$1" bundle="$2" nginx_conf="$3" description="$4"
   mkdir -p "$CONTEXT/$component"
@@ -119,10 +117,8 @@ build_frontend() {
 
 build_scout scout "VorPilot Server backend"
 build_frontend frontend frontend-dist.tar.gz nginx.conf "VorPilot Server web UI"
-build_scout scout-ce "VorPilot Server CE backend"
-build_frontend frontend-ce frontend-ce-dist.tar.gz nginx-ce.conf "VorPilot Server CE web UI"
 
-COMPONENTS=(scout frontend scout-ce frontend-ce)
+COMPONENTS=(scout frontend)
 IMAGE_ARGS=()
 for component in "${COMPONENTS[@]}"; do
   IMAGE_ARGS+=(--image "$component=$IMAGE_PREFIX$component=$OUT/$component")

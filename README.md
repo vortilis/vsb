@@ -9,11 +9,12 @@ version and signs them:
 
 - `ghcr.io/vortilis/vorpilot-scout`, `ghcr.io/vortilis/vorpilot-frontend` —
   Server Standard and Pro
-- `ghcr.io/vortilis/vorpilot-scout-ce`, `ghcr.io/vortilis/vorpilot-frontend-ce` —
-  Server CE, the open-source build (`scout.ce: true` in the server chart)
 - `oci://ghcr.io/vortilis/charts/vorpilot-server`
 - `oci://ghcr.io/vortilis/charts/vorpilot-agent`
 - `oci://ghcr.io/vortilis/charts/vorpilot-rbac-bootstrap`
+
+Server CE, the open-source build, is released separately under the same
+version.
 
 This repository holds no source code, and its files are managed elsewhere —
 changes made here are overwritten.
