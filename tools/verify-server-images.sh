@@ -12,6 +12,12 @@
 #   - Trivy finds no CRITICAL vulnerability that has a fix. Accepted exceptions
 #     live in trivyignore.yaml, each with a statement. HIGH and CRITICAL are
 #     written to trivy/<image>-<os>-<arch>.txt either way.
+#
+# The chart's third-party images (third-party-images.txt: the reverse proxy,
+# the sign-in proxy, the init image) pass the same Trivy gate, pulled by digest
+# from their registries for each platform: the hub runs them as much as its own,
+# and a fixable CRITICAL in its sign-in proxy matters more than one in ours.
+# Reports: trivy/third-party-<name>-<os>-<arch>.txt.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -42,6 +48,8 @@ for required in DIR VERSION TAG PLATFORMS IGNOREFILE; do
 done
 [ -d "$DIR" ] || die "$DIR not found"
 [ -f "$IGNOREFILE" ] || die "$IGNOREFILE not found"
+THIRD_PARTY="$DIR/third-party-images.txt"
+grep -q '[^[:space:]]' "$THIRD_PARTY" 2>/dev/null || die "$THIRD_PARTY missing or empty"
 command -v trivy >/dev/null 2>&1 || die "trivy not found"
 
 COMPONENTS=(scout frontend)
@@ -54,23 +62,47 @@ done
 
 mkdir -p "$DIR/trivy"
 IFS=',' read -r -a PLATFORM_LIST <<<"$PLATFORMS"
+
+# scan LABEL REPORT TRIVY_TARGET... — the report (HIGH and CRITICAL) and the gate
+# (a fixable CRITICAL fails) for one image and platform.
+scan() {
+  local label="$1" report="$2"
+  shift 2
+  trivy image "$@" --quiet --scanners vuln \
+    --severity HIGH,CRITICAL --ignorefile "$IGNOREFILE" --format table --output "$report"
+  if trivy image "$@" --quiet --scanners vuln \
+      --severity CRITICAL --ignore-unfixed --ignorefile "$IGNOREFILE" --exit-code 1 \
+      --format table >"$report.gate" 2>&1; then
+    echo "   ✓ $label — no fixable CRITICAL"
+    rm -f "$report.gate"
+  else
+    echo "   ✗ $label — fixable CRITICAL vulnerabilities:"
+    sed 's/^/      /' "$report.gate"
+    failed=1
+  fi
+}
+
 for component in "${COMPONENTS[@]}"; do
   for platform in "${PLATFORM_LIST[@]}"; do
-    report="$DIR/trivy/$component-${platform//\//-}.txt"
-    trivy image --input "$DIR/$component" --platform "$platform" --quiet --scanners vuln \
-      --severity HIGH,CRITICAL --ignorefile "$IGNOREFILE" --format table --output "$report"
-    if trivy image --input "$DIR/$component" --platform "$platform" --quiet --scanners vuln \
-        --severity CRITICAL --ignore-unfixed --ignorefile "$IGNOREFILE" --exit-code 1 \
-        --format table >"$report.gate" 2>&1; then
-      echo "   ✓ $component $platform — no fixable CRITICAL"
-      rm -f "$report.gate"
-    else
-      echo "   ✗ $component $platform — fixable CRITICAL vulnerabilities:"
-      sed 's/^/      /' "$report.gate"
-      failed=1
-    fi
+    scan "$component $platform" "$DIR/trivy/$component-${platform//\//-}.txt" \
+      --input "$DIR/$component" --platform "$platform"
   done
 done
+
+# --image-src remote: the registry's image for that platform, never a copy of
+# the same tag in the local Docker daemon (another platform, or retagged).
+while IFS= read -r reference || [ -n "$reference" ]; do
+  [ -n "$reference" ] || continue
+  case "$reference" in
+    *@sha256:*) ;;
+    *) echo "   ✗ $reference — not pinned by digest"; failed=1; continue ;;
+  esac
+  name="${reference%%@*}"; name="${name##*/}"; name="${name%%:*}"
+  for platform in "${PLATFORM_LIST[@]}"; do
+    scan "$name $platform" "$DIR/trivy/third-party-$name-${platform//\//-}.txt" \
+      "$reference" --image-src remote --platform "$platform"
+  done
+done <"$THIRD_PARTY"
 
 if [ "$failed" -ne 0 ]; then
   echo "Verification failed — nothing may be published from $DIR." >&2
